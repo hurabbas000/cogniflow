@@ -1,0 +1,2003 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CogniFlow - Anki-Style Flashcards</title>
+    <!-- Note: The CDN is used for development purposes. For production, a build step with the Tailwind CLI is recommended. -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Libraries for parsing DOCX and PDF files -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.min.js"></script>
+    <script>
+        // Set initial theme to avoid flash of unstyled content
+        tailwind.config = {
+            darkMode: 'class',
+        }
+        if (localStorage.getItem('cogniFlowTheme') === 'dark') {
+            document.documentElement.classList.add('dark')
+        } else {
+            document.documentElement.classList.remove('dark')
+        }
+    </script>
+    <style>
+        html {
+            scroll-behavior: smooth;
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f0f2f5;
+        }
+        .dark body {
+            background-color: #030712;
+        }
+        .cloze-hidden {
+            color: #1d4ed8;
+            font-weight: 600;
+            cursor: pointer;
+        }
+        .cloze-revealed {
+            color: #1e293b;
+            font-weight: 600;
+            background-color: #dbeafe;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+        .dark .cloze-revealed {
+             color: #e0e7ff;
+             background-color: #312e81;
+        }
+        [v-cloak] {
+            display: none;
+        }
+        .perspective-container {
+            perspective: 1000px;
+        }
+        .flashcard-inner {
+            transition: transform 0.6s;
+            transform-style: preserve-3d;
+        }
+        .flashcard-front, .flashcard-back {
+            -webkit-backface-visibility: hidden; /* For Safari */
+            backface-visibility: hidden;
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            padding: 1.5rem;
+        }
+        .flashcard-back {
+            transform: rotateY(180deg);
+        }
+        .progress-bar-bg {
+            background-color: #e5e7eb;
+        }
+        .dark .progress-bar-bg {
+             background-color: #374151;
+        }
+        .progress-bar-fill {
+            background-color: #4f46e5;
+            transition: width 0.5s ease-in-out;
+        }
+        .is-flipped {
+            transform: rotateY(180deg);
+        }
+        .details-arrow[open] summary::after {
+            transform: rotate(90deg);
+        }
+        summary::after {
+             content: '►';
+             transition: transform 0.2s;
+             display: inline-block;
+             margin-left: 8px;
+        }
+        /* Sidebar transition */
+        .sidebar-transition {
+            transition: width 0.3s ease-in-out, transform 0.3s ease-in-out;
+        }
+
+        /* Animation classes for Vue transitions */
+        .fade-enter-active, .fade-leave-active {
+            transition: opacity 0.3s ease;
+        }
+        .fade-enter-from, .fade-leave-to {
+            opacity: 0;
+        }
+        .scale-fade-enter-active, .scale-fade-leave-active {
+            transition: all 0.2s ease-in-out;
+        }
+        .scale-fade-enter-from, .scale-fade-leave-to {
+            opacity: 0;
+            transform: scale(0.95);
+        }
+        .toast-enter-active, .toast-leave-active {
+            transition: all 0.5s ease;
+        }
+        .toast-enter-from, .toast-leave-to {
+            opacity: 0;
+            transform: translateY(-20px);
+        }
+    </style>
+</head>
+<body class="dark:bg-gray-900 dark:text-slate-300">
+
+    <div id="app" v-cloak class="min-h-screen">
+
+        <!-- App-level Error View -->
+        <div v-if="appError" class="flex items-center justify-center min-h-screen bg-red-50 text-red-800">
+            <div class="text-center p-8 bg-white shadow-lg rounded-lg max-w-lg">
+                <h2 class="text-2xl font-bold mb-4">An Error Occurred</h2>
+                <p class="text-left bg-red-100 p-4 rounded font-mono">{{ appError }}</p>
+                <p class="mt-4 text-sm text-gray-600">Please check the console for more details and verify your Firebase setup.</p>
+            </div>
+        </div>
+        
+        <!-- Auth View -->
+        <div v-if="!user && !appError" class="flex items-center justify-center min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-800 dark:to-gray-900">
+            <div class="w-full max-w-md p-8 space-y-6 bg-white dark:bg-gray-800 rounded-2xl shadow-xl">
+                <div class="text-center">
+                    <h1 class="text-3xl font-bold text-gray-900 dark:text-white">CogniFlow 🧠</h1>
+                    <p class="mt-2 text-gray-600 dark:text-gray-400">Your personal spaced repetition flashcard system.</p>
+                </div>
+                <!-- Auth Forms -->
+                <div v-if="!authReady" class="text-center p-8">
+                    <p class="text-gray-600 dark:text-gray-400">Connecting...</p>
+                </div>
+                <div v-else>
+                    <!-- Login Form -->
+                    <form v-if="authView === 'login'" @submit.prevent="handleLogin" class="space-y-6">
+                        <div>
+                            <label for="email" class="text-sm font-medium text-gray-700 dark:text-gray-300">Email</label>
+                            <input v-model="email" type="email" id="email" required class="w-full px-3 py-2 mt-1 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                        </div>
+                        <div>
+                            <label for="password" class="text-sm font-medium text-gray-700 dark:text-gray-300">Password</label>
+                            <input v-model="password" type="password" id="password" required class="w-full px-3 py-2 mt-1 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                        </div>
+                        <p v-if="authError" class="text-sm text-red-600">{{ authError }}</p>
+                        <button type="submit" class="w-full py-2 text-white bg-indigo-600 rounded-md hover:bg-indigo-700 active:bg-indigo-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors duration-300 transform active:scale-95">Login</button>
+                        <p class="text-sm text-center text-gray-600 dark:text-gray-400">
+                            Don't have an account? <a href="#" @click.prevent="authView = 'signup'" class="font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-400 dark:hover:text-indigo-300">Sign up</a>
+                        </p>
+                    </form>
+
+                    <!-- Signup Form -->
+                    <form v-if="authView === 'signup'" @submit.prevent="handleSignup" class="space-y-6">
+                        <div>
+                            <label for="signup-email" class="text-sm font-medium text-gray-700 dark:text-gray-300">Email</label>
+                            <input v-model="email" type="email" id="signup-email" required class="w-full px-3 py-2 mt-1 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                        </div>
+                        <div>
+                            <label for="signup-password" class="text-sm font-medium text-gray-700 dark:text-gray-300">Password</label>
+                            <input v-model="password" type="password" id="signup-password" required class="w-full px-3 py-2 mt-1 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                        </div>
+                        <p v-if="authError" class="text-sm text-red-600">{{ authError }}</p>
+                        <button type="submit" class="w-full py-2 text-white bg-indigo-600 rounded-md hover:bg-indigo-700 active:bg-indigo-800 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 transition-colors duration-300 transform active:scale-95">Create Account</button>
+                        <p class="text-sm text-center text-gray-600 dark:text-gray-400">
+                            Already have an account? <a href="#" @click.prevent="authView = 'login'" class="font-medium text-indigo-600 hover:text-indigo-500 dark:text-indigo-400 dark:hover:text-indigo-300">Log in</a>
+                        </p>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main App View -->
+        <div v-if="user && !appError" class="relative min-h-screen md:flex">
+             <!-- Mobile Header -->
+            <div class="md:hidden flex justify-between items-center p-4 bg-white dark:bg-gray-800 shadow-md">
+                <h1 class="text-xl font-bold text-indigo-600">CogniFlow 🧠</h1>
+                <button @click="isMobileSidebarOpen = true">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16m-7 6h7"></path></svg>
+                </button>
+            </div>
+
+            <!-- Backdrop for Mobile Sidebar -->
+            <transition name="fade">
+                <div v-if="isMobileSidebarOpen" @click="isMobileSidebarOpen = false" class="fixed inset-0 bg-black bg-opacity-50 z-20 md:hidden"></div>
+            </transition>
+
+            <!-- Sidebar -->
+            <nav :class="{'w-64': isSidebarOpen, 'w-20': !isSidebarOpen, 'translate-x-0': isMobileSidebarOpen, '-translate-x-full': !isMobileSidebarOpen}" 
+                class="bg-white dark:bg-gray-800 dark:border-r dark:border-gray-700 shadow-md flex-shrink-0 flex flex-col fixed inset-y-0 left-0 z-30 transform md:relative md:translate-x-0 sidebar-transition">
+                <div class="p-4 flex items-center" :class="isSidebarOpen ? 'justify-between' : 'justify-center'">
+                    <h1 class="text-2xl font-bold text-indigo-600 transition-opacity" :class="{'hidden': !isSidebarOpen}">CogniFlow 🧠</h1>
+                </div>
+                <ul class="mt-4 flex-grow">
+                    <li><a href="#" @click.prevent="currentView = 'dashboard'" :class="{'bg-indigo-100 text-indigo-700 dark:bg-gray-700': currentView === 'dashboard'}" class="flex items-center px-4 py-3 text-gray-700 dark:text-gray-300 hover:bg-indigo-50 dark:hover:bg-gray-700 hover:text-indigo-700 dark:hover:text-indigo-300" :title="isSidebarOpen ? '' : 'Dashboard'">
+                        <svg class="w-6 h-6 mr-3 flex-shrink-0" :class="{'mr-3': isSidebarOpen}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
+                        <span :class="{'hidden': !isSidebarOpen}">Dashboard</span>
+                    </a></li>
+                    <li><a href="#" @click.prevent="currentView = 'browse'" :class="{'bg-indigo-100 text-indigo-700 dark:bg-gray-700': currentView === 'browse'}" class="flex items-center px-4 py-3 text-gray-700 dark:text-gray-300 hover:bg-indigo-50 dark:hover:bg-gray-700 hover:text-indigo-700 dark:hover:text-indigo-300" :title="isSidebarOpen ? '' : 'Browse'">
+                        <svg class="w-6 h-6 mr-3 flex-shrink-0" :class="{'mr-3': isSidebarOpen}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6"></path></svg>
+                        <span :class="{'hidden': !isSidebarOpen}">Browse</span>
+                    </a></li>
+                    <li><a href="#" @click.prevent="currentView = 'stats'" :class="{'bg-indigo-100 text-indigo-700 dark:bg-gray-700': currentView === 'stats'}" class="flex items-center px-4 py-3 text-gray-700 dark:text-gray-300 hover:bg-indigo-50 dark:hover:bg-gray-700 hover:text-indigo-700 dark:hover:text-indigo-300" :title="isSidebarOpen ? '' : 'Statistics'">
+                        <svg class="w-6 h-6 mr-3 flex-shrink-0" :class="{'mr-3': isSidebarOpen}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 3.055A9.001 9.001 0 1020.945 13H11V3.055z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.488 9H15V3.512A9.025 9.025 0 0120.488 9z"></path></svg>
+                        <span :class="{'hidden': !isSidebarOpen}">Statistics</span>
+                    </a></li>
+                    <li><a href="#" @click.prevent="currentView = 'settings'" :class="{'bg-indigo-100 text-indigo-700 dark:bg-gray-700': currentView === 'settings'}" class="flex items-center px-4 py-3 text-gray-700 dark:text-gray-300 hover:bg-indigo-50 dark:hover:bg-gray-700 hover:text-indigo-700 dark:hover:text-indigo-300" :title="isSidebarOpen ? '' : 'Settings'">
+                        <svg class="w-6 h-6 mr-3 flex-shrink-0" :class="{'mr-3': isSidebarOpen}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                        <span :class="{'hidden': !isSidebarOpen}">Settings</span>
+                    </a></li>
+                    <li><a href="#" @click.prevent="showRecycleBinModal = true" class="flex items-center px-4 py-3 text-gray-700 dark:text-gray-300 hover:bg-indigo-50 dark:hover:bg-gray-700 hover:text-indigo-700 dark:hover:text-indigo-300" :title="isSidebarOpen ? '' : 'Recycle Bin'">
+                        <svg class="w-6 h-6 mr-3 flex-shrink-0" :class="{'mr-3': isSidebarOpen}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                        <span :class="{'hidden': !isSidebarOpen}">Recycle Bin</span>
+                    </a></li>
+                </ul>
+                <div class="p-4 border-t dark:border-gray-700">
+                    <button @click="isSidebarOpen = !isSidebarOpen" class="hidden md:flex items-center justify-center w-full px-4 py-2 text-sm text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg mb-4 dark:bg-gray-700 dark:text-gray-300 dark:hover:bg-gray-600">
+                        <svg v-if="isSidebarOpen" class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7m8 14l-7-7 7-7" /></svg>
+                        <svg v-else class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M5 5l7 7-7 7" /></svg>
+                    </button>
+                    <div :class="{'items-center': !isSidebarOpen, 'items-start': isSidebarOpen}" class="flex flex-col">
+                        <p class="text-sm text-gray-500 dark:text-gray-400 truncate" :class="{'hidden': !isSidebarOpen}" :title="user.email || 'Anonymous User'">{{ user.email || 'Anonymous User' }}</p>
+                        <button @click="handleLogout" class="w-full mt-2 text-left flex items-center px-4 py-2 text-sm text-red-600 bg-red-100 hover:bg-red-200 rounded-lg dark:text-red-400 dark:bg-red-900/50 dark:hover:bg-red-900/70" :class="{'justify-center': !isSidebarOpen}">
+                            <svg class="w-5 h-5 flex-shrink-0" :class="{'mr-3': isSidebarOpen}" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
+                            <span :class="{'hidden': !isSidebarOpen}">Logout</span>
+                        </button>
+                    </div>
+                </div>
+            </nav>
+
+            <!-- Main Content -->
+            <main class="flex-1 p-4 sm:p-8 bg-gray-50 dark:bg-gray-900 overflow-y-auto">
+                <!-- Dashboard View -->
+                <div v-if="currentView === 'dashboard'">
+                    <div class="flex flex-wrap justify-between items-center mb-6 gap-4">
+                        <h2 class="text-3xl font-bold dark:text-white">Decks</h2>
+                        <div class="flex items-center space-x-2 bg-white dark:bg-gray-800 p-1 rounded-lg shadow-sm">
+                            <button @click="deckFilter = 'all'" :class="{'bg-indigo-600 text-white': deckFilter === 'all'}" class="px-3 py-1 text-sm font-medium rounded-md transition-colors">All</button>
+                            <button @click="deckFilter = 'due'" :class="{'bg-indigo-600 text-white': deckFilter === 'due'}" class="px-3 py-1 text-sm font-medium rounded-md transition-colors">Due</button>
+                            <button @click="deckFilter = 'new'" :class="{'bg-indigo-600 text-white': deckFilter === 'new'}" class="px-3 py-1 text-sm font-medium rounded-md transition-colors">New</button>
+                        </div>
+                        <div class="flex flex-wrap gap-2">
+                             <button @click="triggerImport" class="flex items-center gap-2 px-4 py-2 text-indigo-600 bg-indigo-100 rounded-lg hover:bg-indigo-200 shadow-sm transition-colors dark:text-indigo-300 dark:bg-indigo-900/50 dark:hover:bg-indigo-900">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"></path></svg>
+                                Import
+                             </button>
+                             <input type="file" ref="fileInput" @change="importDeck" class="hidden" accept=".json">
+                            <button @click="openAutoDeckModal" class="flex items-center gap-2 px-4 py-2 text-white bg-teal-500 rounded-lg hover:bg-teal-600 shadow-sm transition-colors">
+                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l-3 3m0 0l-3-3m3 3V3m0 18v-4m3 3l-3-3m0 0l-3 3m3-3v-4"></path></svg>
+                                Generate
+                            </button>
+                            <button @click="showAddDeckModal = true" class="flex items-center gap-2 px-4 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-sm transition-colors">
+                               <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6"></path></svg>
+                                Add Deck
+                            </button>
+                        </div>
+                    </div>
+
+                    <div v-if="decks.length === 0" class="text-center py-12 bg-white dark:bg-gray-800 rounded-lg shadow-sm">
+                        <p class="text-gray-500 dark:text-gray-400">You don't have any decks yet. Create one to get started!</p>
+                    </div>
+
+                    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+                        <div v-for="deck in filteredDecks" :key="deck.id" class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md hover:shadow-lg hover:-translate-y-1 transition-all dark:hover:bg-gray-700 flex flex-col border border-transparent hover:border-indigo-500">
+                            <div class="flex justify-between items-start">
+                                <h3 class="text-xl font-bold mb-2 flex-grow dark:text-white">{{ deck.name }}</h3>
+                                <div class="relative">
+                                    <button @click.stop="toggleDeckMenu(deck.id)" class="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-600">
+                                         <svg class="w-5 h-5 text-gray-500 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z"></path></svg>
+                                    </button>
+                                     <transition name="scale-fade">
+                                        <div v-if="deck.showMenu" class="absolute right-0 mt-2 w-48 bg-white dark:bg-gray-900 dark:border dark:border-gray-700 rounded-md shadow-lg z-10">
+                                            <a href="#" @click.prevent="openMergeDeckModal(deck)" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800">Merge Deck</a>
+                                            <a href="#" @click.prevent="exportDeck(deck.id)" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800">Export Deck</a>
+                                            <a href="#" @click.prevent="deleteDeck(deck.id)" class="block px-4 py-2 text-sm text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/50">Delete Deck</a>
+                                        </div>
+                                    </transition>
+                                </div>
+                            </div>
+                            <div class="flex justify-between text-sm text-gray-600 dark:text-gray-400">
+                                <span class="text-blue-600 dark:text-blue-400 font-semibold">{{ deck.dueCount || 0 }} due</span>
+                                <span class="text-green-600 dark:text-green-400 font-semibold">{{ deck.newCount || 0 }} new</span>
+                                <span>{{ deck.totalCount || 0 }} total</span>
+                            </div>
+                            <div class="mt-4">
+                                <div class="flex justify-between items-center text-xs text-gray-500 dark:text-gray-400 mb-1">
+                                    <span>Progress</span>
+                                    <span>{{ deck.progress.toFixed(0) }}%</span>
+                                </div>
+                                <div class="w-full progress-bar-bg rounded-full h-2">
+                                    <div class="progress-bar-fill h-2 rounded-full" :style="{ width: deck.progress + '%' }"></div>
+                                </div>
+                            </div>
+                            <div class="mt-6 flex-grow flex items-end">
+                                <div class="w-full flex space-x-2">
+                                    <button @click.stop="startStudy(deck.id)" class="flex-1 px-4 py-2 text-sm text-white bg-blue-500 rounded-lg hover:bg-blue-600 transition-colors">Study</button>
+                                    <button @click.stop="openCardManager(deck.id)" class="flex-1 px-4 py-2 text-sm text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 transition-colors dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-200">Manage Cards</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                     <!-- Review Heatmap -->
+                    <div class="my-8 bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md max-w-2xl mx-auto">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="text-lg font-bold dark:text-white">Review Heatmap</h3>
+                            <div class="flex items-center">
+                                <button @click="showHeatmap = !showHeatmap" class="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700 mr-4">
+                                    <svg v-if="showHeatmap" class="w-5 h-5 text-gray-600 dark:text-gray-400"  fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"></path></svg>
+                                    <svg v-else class="w-5 h-5 text-gray-600 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 15l7-7 7 7"></path></svg>
+                                </button>
+                                <div class="flex items-center space-x-2">
+                                    <button @click="changeHeatmapMonth(-1)" class="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700">
+                                        <svg class="w-5 h-5 text-gray-600 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"></path></svg>
+                                    </button>
+                                    <span class="text-sm font-semibold w-28 text-center">{{ heatmapMonthName }}</span>
+                                    <button @click="changeHeatmapMonth(1)" class="p-1 rounded-full hover:bg-gray-200 dark:hover:bg-gray-700">
+                                        <svg class="w-5 h-5 text-gray-600 dark:text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"></path></svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                         <transition name="scale-fade">
+                            <div v-if="showHeatmap">
+                                <div class="grid grid-cols-7 gap-1 text-center text-xs text-gray-500 dark:text-gray-400">
+                                    <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
+                                </div>
+                                <div class="grid grid-cols-7 gap-1 mt-2 relative">
+                                    <div v-for="day in heatmapData" :key="day.date" 
+                                        class="w-full aspect-square rounded-md transition-all"
+                                        :class="[day.count > 0 ? getHeatmapColor(day.count) : 'bg-gray-200 dark:bg-gray-700']"
+                                        @mouseover="showTooltip($event, day)"
+                                        @mouseleave="hideTooltip">
+                                    </div>
+                                    <transition name="fade">
+                                        <div v-if="tooltip.show" :style="{top: tooltip.y + 'px', left: tooltip.x + 'px'}" class="absolute bg-gray-900 dark:bg-black text-white text-xs rounded-md py-1 px-2 pointer-events-none transform -translate-x-1/2 -translate-y-full">
+                                            {{ tooltip.content }}
+                                        </div>
+                                    </transition>
+                                </div>
+                            </div>
+                        </transition>
+                    </div>
+                </div>
+
+                <!-- Browse View -->
+                <div v-if="currentView === 'browse'">
+                    <h2 class="text-3xl font-bold mb-6 dark:text-white">Browse Library</h2>
+                    <!-- Summary Panel -->
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md">
+                            <h4 class="text-gray-500 dark:text-gray-400 font-medium">Total Cards</h4>
+                            <p class="text-3xl font-bold mt-2 dark:text-white">{{ browseSummary.total }}</p>
+                        </div>
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md">
+                            <h4 class="text-gray-500 dark:text-gray-400 font-medium">Cards Mastered</h4>
+                            <p class="text-3xl font-bold mt-2 dark:text-white">{{ browseSummary.mastered }}</p>
+                        </div>
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md">
+                            <h4 class="text-gray-500 dark:text-gray-400 font-medium">Due Today</h4>
+                            <p class="text-3xl font-bold mt-2 dark:text-white">{{ browseSummary.due }}</p>
+                        </div>
+                    </div>
+                    <!-- Filters -->
+                    <div class="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-md mb-6">
+                        <div class="flex flex-wrap items-center justify-between gap-4">
+                            <!-- Search Input -->
+                            <div class="relative flex-grow sm:flex-grow-0 sm:w-1/3">
+                                <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                    <svg class="w-5 h-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"></path></svg>
+                                </div>
+                                <input v-model="browseSearch" type="text" placeholder="Search cards..." class="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md leading-5 bg-white placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                            </div>
+                            
+                            <div class="flex items-center gap-4">
+                                <!-- Tag Filter -->
+                                <div class="relative">
+                                     <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                                         <svg class="w-5 h-5 text-gray-400" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path fill-rule="evenodd" d="M17.707 9.293a1 1 0 010 1.414l-7 7a1 1 0 01-1.414 0l-7-7A1 1 0 012 9V4a1 1 0 011-1h5a1 1 0 01.707.293l7 7zM5 6a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"></path></svg>
+                                     </div>
+                                    <input v-model="browseTagFilter" type="text" placeholder="Filter by tag..." class="block w-full pl-10 pr-3 py-2 border border-gray-300 rounded-md leading-5 bg-white placeholder-gray-500 focus:outline-none focus:placeholder-gray-400 focus:ring-1 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600 dark:text-white">
+                                </div>
+
+                                <!-- Status Filter -->
+                                <div class="flex items-center space-x-1 bg-gray-100 dark:bg-gray-700 p-1 rounded-lg">
+                                    <button @click="browseStatusFilter = 'all'" :class="browseStatusFilter === 'all' ? 'bg-white shadow text-indigo-700 dark:bg-gray-600 dark:text-white' : 'text-gray-600 dark:text-gray-300'" class="px-3 py-1 text-sm font-medium rounded-md transition-colors hover:bg-white dark:hover:bg-gray-600">All</button>
+                                    <button @click="browseStatusFilter = 'New'" :class="browseStatusFilter === 'New' ? 'bg-white shadow text-indigo-700 dark:bg-gray-600 dark:text-white' : 'text-gray-600 dark:text-gray-300'" class="px-3 py-1 text-sm font-medium rounded-md transition-colors hover:bg-white dark:hover:bg-gray-600">New</button>
+                                    <button @click="browseStatusFilter = 'Due'" :class="browseStatusFilter === 'Due' ? 'bg-white shadow text-indigo-700 dark:bg-gray-600 dark:text-white' : 'text-gray-600 dark:text-gray-300'" class="px-3 py-1 text-sm font-medium rounded-md transition-colors hover:bg-white dark:hover:bg-gray-600">Due</button>
+                                    <button @click="browseStatusFilter = 'Mastered'" :class="browseStatusFilter === 'Mastered' ? 'bg-white shadow text-indigo-700 dark:bg-gray-600 dark:text-white' : 'text-gray-600 dark:text-gray-300'" class="px-3 py-1 text-sm font-medium rounded-md transition-colors hover:bg-white dark:hover:bg-gray-600">Mastered</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Deck List -->
+                    <div class="space-y-4">
+                        <details v-for="deck in browsableDecks" :key="deck.id" class="bg-white dark:bg-gray-800 rounded-xl shadow-md overflow-hidden transition-all details-arrow">
+                            <summary class="p-4 flex justify-between items-center cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700/50 list-none">
+                                <div class="flex items-center">
+                                    <span class="font-bold text-lg mr-4 dark:text-white">{{ deck.name }}</span>
+                                    <div class="w-32 progress-bar-bg rounded-full h-2.5">
+                                        <div class="progress-bar-fill h-2.5 rounded-full" :style="{ width: deck.progress + '%' }"></div>
+                                    </div>
+                                </div>
+                                <span class="text-sm text-gray-500 dark:text-gray-400">{{ deck.cards.length }} cards</span>
+                            </summary>
+                            <div class="p-4 border-t dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50">
+                                <div class="overflow-x-auto">
+                                    <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
+                                        <thead class="bg-gray-100 dark:bg-gray-700">
+                                            <tr>
+                                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Front</th>
+                                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Back</th>
+                                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Tags</th>
+                                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Status</th>
+                                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Ease</th>
+                                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Interval</th>
+                                                <th class="px-4 py-2 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase">Next Review</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                                            <tr v-for="card in deck.cards" :key="card.id">
+                                                <td class="px-4 py-3 text-sm text-gray-800 dark:text-gray-300" v-html="renderCardContent(card.front)"></td>
+                                                <td class="px-4 py-3 text-sm text-gray-600 dark:text-gray-400" v-html="renderCardContent(card.back)"></td>
+                                                <td class="px-4 py-3 text-sm">
+                                                     <span v-for="tag in card.tags" @click="filterByTag(tag)" :class="['inline-block', 'text-xs', 'font-semibold', 'mr-2', 'px-2.5', 'py-0.5', 'rounded-full', 'cursor-pointer', getTagColor(tag)]">{{ tag }}</span>
+                                                </td>
+                                                <td class="px-4 py-3 text-sm">
+                                                    <span :class="getStatusColor(card.status)" class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full">
+                                                        {{ card.status }}
+                                                    </span>
+                                                </td>
+                                                <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">{{ card.easeFactor.toFixed(2) }}</td>
+                                                <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">{{ card.interval }}d</td>
+                                                <td class="px-4 py-3 text-sm text-gray-500 dark:text-gray-400">{{ card.dueDate ? new Date(card.dueDate).toLocaleDateString() : 'N/A' }}</td>
+                                            </tr>
+                                             <tr v-if="deck.cards.length === 0">
+                                                <td colspan="7" class="px-4 py-3 text-sm text-center text-gray-500 dark:text-gray-400">No cards match the current filters.</td>
+                                            </tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </details>
+                    </div>
+                </div>
+
+
+                <!-- Statistics View -->
+                <div v-if="currentView === 'stats'">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="text-3xl font-bold dark:text-white">Your Progress</h2>
+                        <button @click="exportChart" class="px-4 py-2 text-sm text-indigo-600 bg-indigo-100 rounded-lg hover:bg-indigo-200 shadow-sm transition-colors dark:text-indigo-300 dark:bg-indigo-900/50 dark:hover:bg-indigo-900">Export Chart</button>
+                    </div>
+                    <!-- Stats Cards -->
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-6">
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md flex flex-col justify-between">
+                            <h4 class="text-gray-500 dark:text-gray-400 font-medium">Today's Reviews</h4>
+                            <p class="text-3xl font-bold mt-1 dark:text-white">{{ stats.todayReviews }}</p>
+                        </div>
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md flex flex-col justify-between">
+                             <div class="flex items-center justify-between">
+                                <h4 class="text-gray-500 dark:text-gray-400 font-medium">Learning Streak</h4>
+                                <span class="text-xl">🔥</span>
+                            </div>
+                            <p class="text-3xl font-bold mt-1 dark:text-white">{{ stats.streak }} Days</p>
+                        </div>
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md flex flex-col justify-between">
+                            <h4 class="text-gray-500 dark:text-gray-400 font-medium">Cards Mastered</h4>
+                            <p class="text-3xl font-bold mt-1 dark:text-white">{{ stats.masteredCards }}</p>
+                        </div>
+                    </div>
+                     <div class="grid grid-cols-1 lg:grid-cols-5 gap-6">
+                         <div class="lg:col-span-3 bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md">
+                            <h3 class="font-bold text-lg mb-4 dark:text-white">Reviews Over Time</h3>
+                            <canvas id="reviewChart"></canvas>
+                        </div>
+                        <div class="lg:col-span-2 bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md">
+                            <h3 class="font-bold text-lg mb-4 dark:text-white">Performance by Tag</h3>
+                             <div class="space-y-4">
+                                <div v-for="(tagStats, tagName) in performanceByTag" :key="tagName">
+                                     <div class="flex justify-between items-center text-sm text-gray-600 dark:text-gray-300 mb-1">
+                                        <span @click="filterByTag(tagName)" :class="['font-semibold', 'cursor-pointer', getTagColor(tagName).replace(/bg-(.*?)-100/, 'text-$1-800').replace(/dark:bg-(.*?)-900\/50/, 'dark:text-$1-300')]">{{ tagName }}</span>
+                                        <span class="font-medium">{{ ((tagStats.mastered / tagStats.total) * 100).toFixed(0) }}% Mastered</span>
+                                    </div>
+                                    <div class="w-full progress-bar-bg rounded-full h-2.5">
+                                        <div class="progress-bar-fill h-2.5 rounded-full" :style="{ width: ((tagStats.mastered / tagStats.total) * 100) + '%' }"></div>
+                                    </div>
+                                    <div class="text-xs text-gray-500 dark:text-gray-400 mt-1 flex justify-between">
+                                        <span>Total: {{tagStats.total}}</span>
+                                        <span class="text-green-600 dark:text-green-400">Mastered: {{tagStats.mastered}}</span>
+                                        <span class="text-blue-600 dark:text-blue-400">Due: {{tagStats.due}}</span>
+                                        <span class="text-gray-600 dark:text-gray-300">New: {{tagStats.new}}</span>
+                                    </div>
+                                </div>
+                                <p v-if="Object.keys(performanceByTag).length === 0" class="text-sm text-gray-500 dark:text-gray-400 text-center pt-4">No tags found to show stats for.</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                 <!-- Settings View -->
+                <div v-if="currentView === 'settings'">
+                    <h2 class="text-3xl font-bold mb-6 dark:text-white">Settings</h2>
+                    <div class="space-y-8 max-w-2xl">
+                         <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md">
+                            <h3 class="text-xl font-bold mb-4 dark:text-white">Theme</h3>
+                            <div class="flex items-center space-x-1 bg-gray-100 dark:bg-gray-700 p-1 rounded-lg mt-1">
+                                <button @click="theme = 'light'" :class="theme === 'light' ? 'bg-white dark:bg-gray-600 shadow text-indigo-700 dark:text-white' : 'text-gray-600 dark:text-gray-300'" class="flex-1 px-3 py-1 text-sm font-medium rounded-md transition-colors hover:bg-white dark:hover:bg-gray-600">Light</button>
+                                <button @click="theme = 'dark'" :class="theme === 'dark' ? 'bg-white dark:bg-gray-600 shadow text-indigo-700 dark:text-white' : 'text-gray-600 dark:text-gray-300'" class="flex-1 px-3 py-1 text-sm font-medium rounded-md transition-colors hover:bg-white dark:hover:bg-gray-600">Dark</button>
+                            </div>
+                        </div>
+
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md">
+                            <h3 class="text-xl font-bold mb-4 dark:text-white">Daily Study Limits</h3>
+                            <div class="mb-4">
+                                <label for="new-cards-per-day" class="block text-sm font-medium text-gray-700 dark:text-gray-300">New Cards Per Day</label>
+                                <input type="number" id="new-cards-per-day" v-model.number="settings.newCardsPerDay" min="0" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600">
+                                <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">The maximum number of new cards to introduce in a study session.</p>
+                            </div>
+                             <div class="mb-4">
+                                <label for="max-reviews-per-day" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Maximum Reviews Per Day</label>
+                                <input type="number" id="max-reviews-per-day" v-model.number="settings.maxReviewsPerDay" min="0" class="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm dark:bg-gray-700 dark:border-gray-600">
+                                <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">The maximum number of review cards (due cards) to study in a session.</p>
+                            </div>
+                        </div>
+                        
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-md">
+                            <h3 class="text-xl font-bold mb-4 dark:text-white">Spaced Repetition Intervals</h3>
+                            <p class="text-sm text-gray-500 dark:text-gray-400">The core learning intervals are now managed automatically by the SM-2 algorithm based on your performance.</p>
+                        </div>
+                        <div class="flex justify-end">
+                            <button @click="saveSettings" class="px-6 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700">Save All Settings</button>
+                        </div>
+                    </div>
+                </div>
+
+
+                <!-- Study View -->
+                <div v-if="currentView === 'study'" class="max-w-3xl mx-auto">
+                    <button @click="stopStudy" class="mb-4 text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-300">&larr; Back to Decks</button>
+                    <div v-if="currentCard">
+                        <div class="text-center mb-4 text-sm text-gray-500 dark:text-gray-400">
+                            <span class="text-blue-600 dark:text-blue-400 font-semibold">{{ session.dueQueue.length + session.lapsedQueue.length }} due</span> |
+                            <span class="text-green-600 dark:text-green-400 font-semibold">{{ session.newQueue.length }} new</span>
+                        </div>
+                        <!-- Flashcard -->
+                        <div class="relative perspective-container h-80 cursor-pointer" @click="handleCardClick">
+                            <div class="flashcard-inner relative w-full h-full" :class="{'is-flipped': showAnswer}">
+                                <!-- Front -->
+                                <div class="flashcard-front bg-white dark:bg-gray-800 rounded-2xl shadow-lg">
+                                    <p class="text-2xl" v-html="renderCardContent(currentCard.front)"></p>
+                                </div>
+                                <!-- Back -->
+                                <div class="flashcard-back bg-indigo-50 dark:bg-gray-700 rounded-2xl shadow-lg flex-col">
+                                    <p class="text-2xl text-indigo-800 dark:text-indigo-300 font-medium" v-html="renderCardContent(currentCard.back, true)"></p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="mt-8 flex justify-center">
+                            <div v-if="!showAnswer" class="w-full">
+                                <button @click.stop="revealAnswer" class="w-full py-4 text-xl text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-md transition-colors">Show Answer</button>
+                            </div>
+                            <div v-else class="w-full space-y-4">
+                                <!-- Tags Display -->
+                                <div v-if="currentCard.tags && currentCard.tags.length > 0" class="flex flex-wrap justify-center gap-2">
+                                     <span v-for="tag in currentCard.tags" @click="filterByTag(tag)" :class="['inline-block', 'text-xs', 'font-semibold', 'px-2.5', 'py-0.5', 'rounded-full', 'cursor-pointer', getTagColor(tag)]">{{ tag }}</span>
+                                </div>
+                                <div class="grid grid-cols-4 gap-4 w-full">
+                                    <button @click.stop="rateCard(1)" class="py-3 text-white bg-red-500 rounded-lg hover:bg-red-600 transition-colors">Again</button>
+                                    <button @click.stop="rateCard(2)" class="py-3 text-white bg-orange-500 rounded-lg hover:bg-orange-600 transition-colors">Hard</button>
+                                    <button @click.stop="rateCard(3)" class="py-3 text-white bg-green-500 rounded-lg hover:bg-green-600 transition-colors">Good</button>
+                                    <button @click.stop="rateCard(4)" class="py-3 text-white bg-blue-500 rounded-lg hover:bg-blue-600 transition-colors">Easy</button>
+                                </div>
+                                <button @click.stop="showAnswer = false" class="w-full py-2 text-sm text-gray-700 bg-gray-200 rounded-lg hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600 dark:text-gray-200">Show Question</button>
+                            </div>
+                        </div>
+                    </div>
+                    <div v-else class="text-center py-12 bg-white dark:bg-gray-800 rounded-lg shadow-sm">
+                        <h3 class="text-2xl font-bold dark:text-white">Congratulations!</h3>
+                        <p class="mt-2 text-gray-600 dark:text-gray-400">You've finished this study session.</p>
+                        <button @click="stopStudy" class="mt-6 px-6 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 transition-colors">Return to Dashboard</button>
+                    </div>
+                </div>
+
+                <!-- Card Manager View -->
+                <div v-if="currentView === 'cardManager'">
+                    <div class="flex justify-between items-center mb-6">
+                        <div>
+                             <button @click="currentView = 'dashboard'" class="mb-2 text-indigo-600 dark:text-indigo-400 hover:text-indigo-800 dark:hover:text-indigo-300">&larr; Back to Decks</button>
+                            <h2 class="text-3xl font-bold dark:text-white">Manage Cards: {{ selectedDeck ? selectedDeck.name : '' }}</h2>
+                        </div>
+                        <button @click="openAddCardModal" class="px-4 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 shadow-sm transition-colors">Add New Card</button>
+                    </div>
+                     <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md">
+                        <ul class="divide-y divide-gray-200 dark:divide-gray-700">
+                            <li v-for="card in cards" :key="card.id" class="p-4 flex justify-between items-center">
+                                <div class="w-1/2 overflow-auto" v-html="renderCardContent(card.front)"></div>
+                                <div class="w-1/2 overflow-auto pl-4" v-html="renderCardContent(card.back)"></div>
+                                <div class="flex-shrink-0">
+                                    <button @click.stop="openEditCardModal(card)" class="text-sm text-blue-500 hover:text-blue-700 dark:text-blue-400 dark:hover:text-blue-300">Edit</button>
+                                    <button @click.stop="deleteCard(card.id)" class="ml-4 text-sm text-red-500 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300">Delete</button>
+                                </div>
+                            </li>
+                             <li v-if="cards.length === 0" class="p-4 text-center text-gray-500 dark:text-gray-400">
+                                This deck has no cards.
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </main>
+        </div>
+        
+        <!-- Add Deck Modal -->
+        <transition name="scale-fade">
+            <div v-if="showAddDeckModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" @click.self="showAddDeckModal = false">
+                <div class="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-md">
+                    <h3 class="text-2xl font-bold mb-4 dark:text-white">Add New Deck</h3>
+                    <form @submit.prevent="addDeck">
+                        <input v-model="newDeckName" type="text" placeholder="Deck Name" required class="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:border-gray-600">
+                        <div class="mt-6 flex justify-end space-x-4">
+                            <button type="button" @click="showAddDeckModal = false" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600">Cancel</button>
+                            <button type="submit" class="px-4 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700">Create</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </transition>
+        
+        <!-- Add/Edit Card Modal -->
+         <transition name="scale-fade">
+            <div v-if="showCardModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" @click.self="closeCardModal">
+                <div class="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-2xl">
+                    <h3 class="text-2xl font-bold mb-4 dark:text-white">{{ editingCard ? 'Edit Card' : 'Add New Card' }}</h3>
+                    <form @submit.prevent="saveCard">
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Front</label>
+                            <textarea v-model="cardForm.front" rows="4" class="w-full mt-1 p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:border-gray-600"></textarea>
+                        </div>
+                        <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Back</label>
+                            <textarea v-model="cardForm.back" rows="4" class="w-full mt-1 p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:border-gray-600"></textarea>
+                        </div>
+                         <div class="mb-4">
+                            <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">Tags (comma-separated)</label>
+                            <input v-model="cardForm.tags" type="text" placeholder="e.g., Anatomy, Hard" class="w-full mt-1 p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:border-gray-600">
+                        </div>
+                        <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                            Use <code class="bg-gray-100 dark:bg-gray-600 p-1 rounded">{{ clozeExample }}</code> for cloze deletions.
+                        </p>
+                        <div class="mt-6 flex justify-end space-x-4">
+                            <button type="button" @click="closeCardModal" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600">Cancel</button>
+                            <button type="submit" class="px-4 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700">Save Card</button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </transition>
+
+
+        <!-- Generate AutoDeck Modal -->
+        <transition name="scale-fade">
+            <div v-if="showAutoDeckModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" @click.self="closeAutoDeckModal">
+                <div class="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] flex flex-col">
+                    <h3 class="text-2xl font-bold mb-4 dark:text-white">Generate Flashcards with AI</h3>
+                    
+                    <!-- Step 1: Input -->
+                    <div v-if="autoDeckState === 'input'" class="flex-1 overflow-y-auto">
+                        <form @submit.prevent="handleGenerateCards">
+                            <div class="mb-4">
+                                <label for="deckName" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Deck Name</label>
+                                <input v-model="autoDeckName" type="text" id="deckName" placeholder="e.g., Cardiac Physiology" required class="w-full mt-1 px-3 py-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:border-gray-600">
+                            </div>
+                            <div>
+                                <label for="deckText" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Paste your text or upload a file</label>
+                                <textarea v-model="autoDeckText" id="deckText" rows="10" placeholder="Paste your notes, an article, or any text..." required class="w-full mt-1 p-2 border border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 dark:bg-gray-700 dark:border-gray-600"></textarea>
+                                <label for="file-upload" class="mt-2 inline-block cursor-pointer text-sm text-indigo-600 hover:text-indigo-500 dark:text-indigo-400 dark:hover:text-indigo-300">
+                                    Or upload a .txt, .docx, or .pdf file
+                                </label>
+                                <input id="file-upload" type="file" @change="handleFileUpload" accept=".txt,.docx,.pdf" class="hidden">
+                            </div>
+                            <p v-if="generationError" class="text-sm text-red-600 mt-2">{{ generationError }}</p>
+                            <div class="mt-6 flex justify-end space-x-4">
+                                <button type="button" @click="closeAutoDeckModal" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600">Cancel</button>
+                                <button type="submit" class="px-4 py-2 text-white bg-teal-500 rounded-lg hover:bg-teal-600">Generate Cards</button>
+                            </div>
+                        </form>
+                    </div>
+
+                    <!-- Step 2: Generating / Processing -->
+                    <div v-if="autoDeckState === 'generating' || autoDeckState === 'processing'" class="text-center p-12">
+                         <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-indigo-600 mx-auto"></div>
+                        <p class="mt-4 text-gray-600 dark:text-gray-400">{{ autoDeckState === 'processing' ? 'Processing file...' : 'Generating flashcards...' }} Please wait.</p>
+                    </div>
+
+                    <!-- Step 3: Preview & Edit -->
+                    <div v-if="autoDeckState === 'preview'" class="flex-1 flex flex-col overflow-hidden">
+                        <p class="mb-4 text-gray-600 dark:text-gray-400">Here are the generated cards for your deck: <strong>{{ autoDeckName }}</strong>. You can edit them before saving.</p>
+                        <div class="flex-1 overflow-y-auto pr-2 -mr-2 space-y-4">
+                            <div v-for="(card, index) in generatedCards" :key="index" class="p-4 bg-gray-50 dark:bg-gray-700 rounded-lg border dark:border-gray-600">
+                                <div class="flex items-start space-x-4">
+                                    <div class="flex-1">
+                                        <label class="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Question (Front)</label>
+                                        <textarea v-model="card.question" rows="2" class="w-full mt-1 p-2 text-sm border border-gray-200 rounded-md shadow-sm dark:bg-gray-600 dark:border-gray-500"></textarea>
+                                    </div>
+                                    <div class="flex-1">
+                                        <label class="block text-xs font-semibold text-gray-500 dark:text-gray-400 uppercase">Answer (Back)</label>
+                                        <textarea v-model="card.answer" rows="2" class="w-full mt-1 p-2 text-sm border border-gray-200 rounded-md shadow-sm dark:bg-gray-600 dark:border-gray-500"></textarea>
+                                    </div>
+                                    <button @click="deleteGeneratedCard(index)" class="mt-5 p-2 text-gray-400 hover:text-red-500 hover:bg-red-100 dark:hover:bg-red-900/50 rounded-full transition-colors">
+                                        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                         <div class="mt-6 flex justify-end space-x-4 pt-4 border-t dark:border-gray-700">
+                            <button type="button" @click="autoDeckState = 'input'" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600">&larr; Back</button>
+                            <button @click="saveGeneratedDeck" class="px-4 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700">Save Deck</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </transition>
+        
+        <!-- Confirmation Modal -->
+        <transition name="scale-fade">
+            <div v-if="showConfirmModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" @click.self="showConfirmModal = false">
+                <div class="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-md">
+                    <h3 class="text-xl font-bold mb-4 dark:text-white">{{ confirmModal.title }}</h3>
+                    <p class="text-gray-600 dark:text-gray-400 mb-6">{{ confirmModal.message }}</p>
+                    <div class="flex justify-end space-x-4">
+                        <button @click="showConfirmModal = false" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600">{{ confirmModal.cancelText }}</button>
+                        <button @click="confirmModal.onConfirm" class="px-4 py-2 text-white rounded-lg" :class="confirmModal.isDestructive ? 'bg-red-600 hover:bg-red-700' : 'bg-indigo-600 hover:bg-indigo-700'">{{ confirmModal.confirmText }}</button>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- Merge Deck Modal -->
+        <transition name="scale-fade">
+            <div v-if="showMergeDeckModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" @click.self="closeMergeDeckModal">
+                <div class="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-md">
+                    <h3 class="text-2xl font-bold mb-4 dark:text-white">Merge Deck</h3>
+                    <p class="mb-4 text-gray-600 dark:text-gray-400">Merge all cards from <strong>{{ sourceDeck.name }}</strong> into another deck. The source deck will be deleted.</p>
+                    
+                    <div class="mb-4">
+                        <label for="destination-deck" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Destination Deck</label>
+                        <select v-model="destinationDeckId" id="destination-deck" class="mt-1 block w-full pl-3 pr-10 py-2 text-base border-gray-300 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm rounded-md dark:bg-gray-700 dark:border-gray-600">
+                            <option :value="null" disabled>Select a deck</option>
+                            <option v-for="deck in mergeableDecks" :key="deck.id" :value="deck.id">{{ deck.name }}</option>
+                        </select>
+                    </div>
+
+                    <div class="mt-6 flex justify-end space-x-4">
+                        <button type="button" @click="closeMergeDeckModal" class="px-4 py-2 bg-gray-200 rounded-lg hover:bg-gray-300 dark:bg-gray-700 dark:hover:bg-gray-600">Cancel</button>
+                        <button @click="mergeDecks" :disabled="!destinationDeckId" class="px-4 py-2 text-white bg-indigo-600 rounded-lg hover:bg-indigo-700 disabled:bg-gray-400">Merge</button>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+        <!-- Recycle Bin Modal -->
+        <transition name="scale-fade">
+            <div v-if="showRecycleBinModal" class="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50" @click.self="showRecycleBinModal = false">
+                <div class="bg-white dark:bg-gray-800 p-8 rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-2xl font-bold dark:text-white">Recycle Bin</h3>
+                        <button @click="showRecycleBinModal = false" class="p-2 rounded-full hover:bg-gray-200 dark:hover:bg-gray-600">
+                            <svg class="w-6 h-6 text-gray-600 dark:text-gray-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                        </button>
+                    </div>
+                    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">Decks are permanently deleted after 7 days.</p>
+                    <div class="flex-grow overflow-y-auto">
+                        <div v-if="recycledDecks.length === 0" class="text-center py-12 text-gray-500 dark:text-gray-400">
+                            The recycle bin is empty.
+                        </div>
+                        <ul v-else class="space-y-3">
+                            <li v-for="deck in recycledDecks" :key="deck.id" class="p-4 bg-gray-100 dark:bg-gray-700 rounded-lg flex justify-between items-center">
+                                <div>
+                                    <p class="font-semibold">{{ deck.name }}</p>
+                                    <p class="text-xs text-gray-500 dark:text-gray-400">Deleted: {{ new Date(deck.deletedAt.seconds * 1000).toLocaleString() }}</p>
+                                </div>
+                                <div class="space-x-2">
+                                    <button @click="restoreDeck(deck.id)" class="px-3 py-1 text-sm text-green-700 bg-green-100 rounded-md hover:bg-green-200 dark:bg-green-900/50 dark:text-green-300 dark:hover:bg-green-900">Restore</button>
+                                    <button @click="permanentlyDeleteDeck(deck.id)" class="px-3 py-1 text-sm text-red-700 bg-red-100 rounded-md hover:bg-red-200 dark:bg-red-900/50 dark:text-red-300 dark:hover:bg-red-900">Delete Forever</button>
+                                </div>
+                            </li>
+                        </ul>
+                    </div>
+                </div>
+            </div>
+        </transition>
+
+         <!-- Toast Notification -->
+        <transition name="toast">
+            <div v-if="toast.show" class="fixed top-5 right-5 z-50 px-6 py-3 rounded-lg shadow-lg" :class="toast.type === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'">
+                {{ toast.message }}
+            </div>
+        </transition>
+
+    </div>
+
+    <script type="module">
+        console.log("Script module started.");
+
+        // Use production build of Vue for better performance.
+        import { createApp, ref, onMounted, reactive, watch, nextTick, computed } from 'https://unpkg.com/vue@3/dist/vue.esm-browser.prod.js';
+        
+        // Firebase imports
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { 
+            getAuth, 
+            createUserWithEmailAndPassword, 
+            signInWithEmailAndPassword, 
+            signOut, 
+            onAuthStateChanged
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { 
+            getFirestore, 
+            collection, 
+            addDoc, 
+            onSnapshot, 
+            query, 
+            doc,
+            updateDoc,
+            deleteDoc,
+            getDocs,
+            setDoc,
+            getDoc,
+            Timestamp,
+            writeBatch,
+            where,
+            orderBy,
+            limit
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        
+        createApp({
+            setup() {
+                console.log("Vue setup function started.");
+                const appError = ref(null);
+                let db, auth;
+
+                // --- 1. FIREBASE INITIALIZATION ---
+                try {
+                   const firebaseConfig = {
+                        apiKey: "AIzaSyC-zt4ZrRFweU8Vax3gyMZnBRqJgvhNor4",
+                        authDomain: "cognify-67965.firebaseapp.com",
+                        projectId: "cognify-67965",
+                        storageBucket: "cognify-67965.appspot.com",
+                        messagingSenderId: "328762489555",
+                        appId: "1:328762489555:web:9eabb5b192563ad5eaf226",
+                        measurementId: "G-Q8ZHZK0D60"
+                    };
+
+                    const app = initializeApp(firebaseConfig);
+                    db = getFirestore(app);
+                    auth = getAuth(app);
+                    // Set up PDF.js worker
+                    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.11.338/pdf.worker.min.js`;
+                    console.log("Firebase initialized successfully.");
+                } catch (error) {
+                    console.error("Firebase Initialization Error:", error.message);
+                    appError.value = `Failed to initialize the application. ${error.message}`;
+                }
+
+                const user = ref(null);
+                const authReady = ref(false);
+                const authView = ref('login');
+                const email = ref('');
+                const password = ref('');
+                const authError = ref(null);
+                const isSidebarOpen = ref(true);
+                const isMobileSidebarOpen = ref(false);
+                const theme = ref(localStorage.getItem('cogniFlowTheme') || 'light'); 
+                const toast = reactive({ show: false, message: '', type: 'success' });
+                let toastTimer = null;
+
+                const currentView = ref('dashboard');
+                const decks = ref([]);
+                const allCards = reactive({});
+                const recycledDecks = ref([]);
+                const deckFilter = ref('all');
+                const showAddDeckModal = ref(false);
+                const newDeckName = ref('');
+                const fileInput = ref(null);
+                
+                const selectedDeckId = ref(null);
+                const selectedDeck = ref(null);
+                const cards = ref([]);
+
+                const showCardModal = ref(false);
+                const editingCard = ref(null);
+                const cardForm = reactive({ front: '', back: '', tags: '' });
+                const clozeExample = '{{c1::text}}';
+
+                const session = reactive({ deckId: null, newQueue: [], dueQueue: [], lapsedQueue: [] });
+                const currentCard = ref(null);
+                const showAnswer = ref(false);
+
+                // Browse state
+                const browseSearch = ref('');
+                const browseTagFilter = ref('');
+                const browseStatusFilter = ref('all');
+                
+                const settings = reactive({
+                    newCardsPerDay: 20,
+                    maxReviewsPerDay: 50,
+                    aiPrompt: "You are an expert in creating effective flashcards. Based on the text provided, generate a list of concise, high-yield flashcards in a question-and-answer format. The questions should test the most important concepts, definitions, and facts in the text. The answers should be accurate and to the point. Ensure you return ONLY a valid JSON array of objects, where each object has a 'question' and 'answer' key."
+                });
+                
+                // AI Deck Generation State
+                const showAutoDeckModal = ref(false);
+                const autoDeckState = ref('input'); // 'input', 'generating', 'preview', 'processing'
+                const autoDeckText = ref('');
+                const autoDeckName = ref('');
+                const generatedCards = ref([]);
+                const generationError = ref(null);
+                
+                // Confirmation Modal State
+                const showConfirmModal = ref(false);
+                const showRecycleBinModal = ref(false);
+                const confirmModal = reactive({ title: '', message: '', onConfirm: null, confirmText: 'Confirm', cancelText: 'Cancel', isDestructive: false });
+                
+                // Merge Modal State
+                const showMergeDeckModal = ref(false);
+                const sourceDeck = ref(null);
+                const destinationDeckId = ref(null);
+                
+                // Heatmap State
+                const heatmapDate = ref(new Date());
+                const tooltip = reactive({ show: false, content: '', x: 0, y: 0 });
+                const progressVersion = ref(0);
+                const showHeatmap = ref(true);
+
+                let unsubscribeDecks = null;
+                let unsubscribeRecycledDecks = null;
+
+                 watch(theme, (newTheme) => {
+                    if (newTheme === 'dark') {
+                        document.documentElement.classList.add('dark');
+                        localStorage.setItem('cogniFlowTheme', 'dark');
+                    } else {
+                        document.documentElement.classList.remove('dark');
+                        localStorage.setItem('cogniFlowTheme', 'light');
+                    }
+                    // A small delay to allow DOM to update colors before re-rendering chart
+                    if(currentView.value === 'stats') setTimeout(() => loadStats(), 50);
+                }, { immediate: true });
+
+                onMounted(() => {
+                    if (appError.value) return; 
+
+                    onAuthStateChanged(auth, (u) => {
+                        user.value = u;
+                        authReady.value = true;
+                        if (u) {
+                           loadUserSettings();
+                           loadUserDecks();
+                           loadStats();
+                        } else {
+                           if (unsubscribeDecks) unsubscribeDecks();
+                           if (unsubscribeRecycledDecks) unsubscribeRecycledDecks();
+                           decks.value = [];
+                           recycledDecks.value = [];
+                           Object.keys(allCards).forEach(key => delete allCards[key]);
+                        }
+                    }, (error) => {
+                        appError.value = "Failed to connect to authentication service.";
+                    });
+
+                    // Keyboard navigation for Study view
+                    document.addEventListener('keydown', (event) => {
+                        if (currentView.value !== 'study' || !currentCard.value) return;
+                        
+                        // Prevent default for space to avoid scrolling
+                        if (event.code === 'Space') {
+                            event.preventDefault();
+                        }
+                        
+                        // Space to flip
+                        if (event.code === 'Space') {
+                            handleCardClick();
+                        } 
+                        // Right Arrow for reveal/good
+                        else if (event.code === 'ArrowRight') {
+                            if (!showAnswer.value) {
+                                revealAnswer();
+                            } else {
+                                rateCard(3); // Good
+                            }
+                        }
+                        // Left Arrow for again
+                        else if (event.code === 'ArrowLeft') {
+                            if (showAnswer.value) {
+                                rateCard(1); // Again
+                            }
+                        }
+                        // Rating keys (1-4) only when answer is shown
+                        else if (showAnswer.value) {
+                            if (event.code === 'Digit1') rateCard(1); // Again
+                            else if (event.code === 'Digit2') rateCard(2); // Hard
+                            else if (event.code === 'Digit3') rateCard(3); // Good
+                            else if (event.code === 'Digit4') rateCard(4); // Easy
+                        }
+                    });
+
+                    // Click outside to close deck menus
+                    document.addEventListener('click', (e) => {
+                        decks.value.forEach(deck => {
+                            deck.showMenu = false;
+                        });
+                    });
+                });
+                
+                // --- UTILITY ---
+                const showToast = (message, type = 'success', duration = 3000) => {
+                    if (toastTimer) clearTimeout(toastTimer);
+                    toast.message = message;
+                    toast.type = type;
+                    toast.show = true;
+                    toastTimer = setTimeout(() => {
+                        toast.show = false;
+                    }, duration);
+                };
+
+                const askForConfirmation = (title, message, onConfirmCallback, options = {}) => {
+                    confirmModal.title = title;
+                    confirmModal.message = message;
+                    confirmModal.onConfirm = async () => {
+                        await onConfirmCallback();
+                        showConfirmModal.value = false;
+                    };
+                    confirmModal.confirmText = options.confirmText || 'Confirm';
+                    confirmModal.cancelText = options.cancelText || 'Cancel';
+                    confirmModal.isDestructive = !!options.isDestructive;
+                    showConfirmModal.value = true;
+                };
+
+                const getTagColor = (tag) => {
+                    const colors = [
+                        'bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-300',
+                        'bg-green-100 text-green-800 dark:bg-green-900/50 dark:text-green-300',
+                        'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/50 dark:text-yellow-300',
+                        'bg-red-100 text-red-800 dark:bg-red-900/50 dark:text-red-300',
+                        'bg-purple-100 text-purple-800 dark:bg-purple-900/50 dark:text-purple-300',
+                        'bg-pink-100 text-pink-800 dark:bg-pink-900/50 dark:text-pink-300',
+                        'bg-indigo-100 text-indigo-800 dark:bg-indigo-900/50 dark:text-indigo-300',
+                        'bg-gray-200 text-gray-800 dark:bg-gray-600 dark:text-gray-100',
+                    ];
+                    let hash = 0;
+                    if (!tag || tag.length === 0) return colors[colors.length-1];
+                    for (let i = 0; i < tag.length; i++) {
+                        hash = tag.charCodeAt(i) + ((hash << 5) - hash);
+                    }
+                    const index = Math.abs(hash % colors.length);
+                    return colors[index];
+                };
+
+                const filterByTag = (tag) => {
+                    browseTagFilter.value = tag;
+                    currentView.value = 'browse';
+                };
+
+                const getCardStatus = (cardProgress) => {
+                    if (cardProgress.repetitions === 0 && cardProgress.interval === 0) return 'New';
+                    if (cardProgress.interval < 1) return 'Learning';
+                    if (cardProgress.interval >= 21) return 'Mastered';
+                    return 'Review';
+                };
+
+                const getStatusColor = (status) => {
+                    const colors = {
+                        'New': 'bg-gray-100 text-gray-800 dark:bg-gray-600 dark:text-gray-200',
+                        'Learning': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/50 dark:text-yellow-300',
+                        'Review': 'bg-yellow-100 text-yellow-800 dark:bg-yellow-900/50 dark:text-yellow-300',
+                        'Due': 'bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-300',
+                        'Mastered': 'bg-green-100 text-green-800 dark:bg-green-900/50 dark:text-green-300'
+                    };
+                    return colors[status] || colors['New'];
+                }
+
+                const toggleDeckMenu = (deckId) => {
+                    decks.value.forEach(d => {
+                        if(d.id === deckId) {
+                            d.showMenu = !d.showMenu;
+                        } else {
+                            d.showMenu = false;
+                        }
+                    });
+                };
+
+                // --- AUTHENTICATION ---
+                const handleLogin = async () => {
+                    authError.value = null;
+                    try { await signInWithEmailAndPassword(auth, email.value, password.value); } 
+                    catch (e) { authError.value = e.message; }
+                };
+                const handleSignup = async () => {
+                    authError.value = null;
+                    try { await createUserWithEmailAndPassword(auth, email.value, password.value); }
+                    catch (e) { authError.value = e.message; }
+                };
+                const handleLogout = async () => { await signOut(auth); };
+
+                // --- SPACED REPETITION (SM-2) DATA HANDLING ---
+                const getProgressData = () => {
+                    if (!user.value) return {};
+                    try {
+                        const data = localStorage.getItem(`cogniFlowProgress_${user.value.uid}`);
+                        return data ? JSON.parse(data) : {};
+                    } catch (e) { console.error("Error reading progress from localStorage:", e); return {}; }
+                };
+
+                const saveProgressData = (data) => {
+                    if (!user.value) return;
+                    try { localStorage.setItem(`cogniFlowProgress_${user.value.uid}`, JSON.stringify(data)); } 
+                    catch (e) { console.error("Error saving progress to localStorage:", e); }
+                };
+
+                const getCardProgress = (deckId, cardId) => {
+                    const progressData = getProgressData();
+                    return progressData[deckId]?.[cardId] || { repetitions: 0, interval: 0, easeFactor: 2.5, dueDate: null, lastReviewed: null };
+                };
+                 const saveCardProgress = (deckId, cardId, progress) => {
+                    const progressData = getProgressData();
+                    if (!progressData[deckId]) progressData[deckId] = {};
+                    progressData[deckId][cardId] = progress;
+                    saveProgressData(progressData);
+                    progressVersion.value++;
+                };
+                
+                // --- DECK & CARD DATA MANAGEMENT ---
+                const filteredDecks = computed(() => {
+                    if (deckFilter.value === 'due') return decks.value.filter(d => d.dueCount > 0);
+                    if (deckFilter.value === 'new') return decks.value.filter(d => d.newCount > 0);
+                    return decks.value;
+                });
+                
+                const loadUserDecks = () => {
+                    if (!user.value) return;
+                    if (unsubscribeDecks) unsubscribeDecks();
+                    if (unsubscribeRecycledDecks) unsubscribeRecycledDecks();
+                    
+                    const collectionPath = `users/${user.value.uid}/decks`;
+                    const qActive = query(collection(db, collectionPath), where("deletedAt", "==", null));
+                    
+                    unsubscribeDecks = onSnapshot(qActive, (snapshot) => {
+                        snapshot.docChanges().forEach((change) => {
+                            const doc = change.doc;
+                            const deckId = doc.id;
+                            if (change.type === "added") {
+                                const newDeck = { id: deckId, ...doc.data(), dueCount: 0, newCount: 0, totalCount: 0, progress: 0, showMenu: false };
+                                decks.value.push(newDeck);
+                                loadAllCardsForDeck(deckId); 
+                            }
+                            if (change.type === "modified") {
+                                const index = decks.value.findIndex(d => d.id === deckId);
+                                if (index !== -1) decks.value[index] = { ...decks.value[index], ...doc.data() };
+                            }
+                            if (change.type === "removed") {
+                                decks.value = decks.value.filter(d => d.id !== deckId);
+                                delete allCards[deckId];
+                            }
+                        });
+                    }, (error) => { appError.value = "Could not load decks."; });
+
+                    const qRecycled = query(collection(db, collectionPath), where("deletedAt", "!=", null));
+                    unsubscribeRecycledDecks = onSnapshot(qRecycled, async (snapshot) => {
+                        const sevenDaysAgo = Timestamp.fromMillis(Date.now() - 7 * 24 * 60 * 60 * 1000);
+                        const decksToDelete = [];
+                        const decksToKeep = [];
+
+                        snapshot.docs.forEach(doc => {
+                            const deck = {id: doc.id, ...doc.data()};
+                            if (deck.deletedAt < sevenDaysAgo) {
+                                decksToDelete.push(deck.id);
+                            } else {
+                                decksToKeep.push(deck);
+                            }
+                        });
+
+                        recycledDecks.value = decksToKeep;
+
+                        if (decksToDelete.length > 0) {
+                            console.log(`Auto-purging ${decksToDelete.length} old decks from recycle bin.`);
+                            for (const deckId of decksToDelete) {
+                                await permanentlyDeleteDeck(deckId, true);
+                            }
+                        }
+                    });
+                };
+                
+                const loadAllCardsForDeck = (deckId) => {
+                    const cardsPath = `users/${user.value.uid}/decks/${deckId}/cards`;
+                    onSnapshot(query(collection(db, cardsPath)), (cardsSnapshot) => {
+                        allCards[deckId] = cardsSnapshot.docs.map(doc => ({id: doc.id, ...doc.data()}));
+                        updateDeckCounts(deckId);
+                    });
+                };
+
+                const updateDeckCounts = (deckId) => {
+                    const deckIndex = decks.value.findIndex(d => d.id === deckId);
+                    if (deckIndex === -1 || !allCards[deckId]) return;
+
+                    const cardsForDeck = allCards[deckId];
+                    const now = new Date();
+                    now.setHours(23, 59, 59, 999);
+                    
+                    let dueCount = 0, newCount = 0, masteredCount = 0;
+                    cardsForDeck.forEach(card => {
+                        const cardProgress = getCardProgress(deckId, card.id);
+                        if (!cardProgress.dueDate) newCount++;
+                        else if (new Date(cardProgress.dueDate) <= now) dueCount++;
+                        if (cardProgress.interval >= 21) masteredCount++;
+                    });
+
+                    decks.value[deckIndex].totalCount = cardsForDeck.length;
+                    decks.value[deckIndex].dueCount = dueCount;
+                    decks.value[deckIndex].newCount = newCount;
+                    decks.value[deckIndex].masteredCount = masteredCount;
+                    decks.value[deckIndex].progress = cardsForDeck.length > 0 ? (masteredCount / cardsForDeck.length) * 100 : 0;
+                };
+
+                const addDeck = async () => {
+                    const trimmedName = newDeckName.value.trim();
+                    if (!trimmedName || !user.value) return;
+                    await addDoc(collection(db, `users/${user.value.uid}/decks`), {
+                        name: trimmedName, createdAt: Timestamp.now(), deletedAt: null
+                    });
+                    newDeckName.value = '';
+                    showAddDeckModal.value = false;
+                };
+
+                const deleteDeck = (deckId) => {
+                    askForConfirmation('Move to Recycle Bin?', 'The deck can be restored for 7 days.', async () => {
+                        if (!user.value) return;
+                        await updateDoc(doc(db, `users/${user.value.uid}/decks`, deckId), { deletedAt: Timestamp.now() });
+                    }, { confirmText: 'Move to Bin', isDestructive: true });
+                };
+                
+                const permanentlyDeleteDeck = async (deckId, fromAutoPurge = false) => {
+                    if (!user.value) return;
+                    try {
+                        const deckRef = doc(db, `users/${user.value.uid}/decks`, deckId);
+                        const cardsRef = collection(deckRef, 'cards');
+                        const cardsSnapshot = await getDocs(cardsRef);
+                        
+                        // Delete subcollection documents in chunks to avoid 500 limit
+                        if (!cardsSnapshot.empty) {
+                            const chunks = [];
+                            for (let i = 0; i < cardsSnapshot.docs.length; i += 499) {
+                                chunks.push(cardsSnapshot.docs.slice(i, i + 499));
+                            }
+                            
+                            for (const chunk of chunks) {
+                                const batch = writeBatch(db);
+                                chunk.forEach(cardDoc => batch.delete(cardDoc.ref));
+                                await batch.commit();
+                            }
+                        }
+                        
+                        // Finally, delete the deck document itself
+                        await deleteDoc(deckRef);
+                        if (!fromAutoPurge) {
+                            showToast('Deck permanently deleted.', 'success');
+                        }
+                    } catch (error) {
+                        console.error("Error permanently deleting deck:", error);
+                        if (!fromAutoPurge) {
+                            showToast("Could not permanently delete the deck.", 'error');
+                        }
+                    }
+                };
+                
+                const restoreDeck = async (deckId) => {
+                     if (!user.value) return;
+                     try {
+                        await updateDoc(doc(db, `users/${user.value.uid}/decks`, deckId), { deletedAt: null });
+                        showToast('Deck restored successfully.', 'success');
+                     } catch(error) {
+                         console.error("Error restoring deck:", error);
+                         showToast('Could not restore deck.', 'error');
+                     }
+                };
+
+                const selectDeck = (deckId) => {
+                    selectedDeckId.value = deckId;
+                    selectedDeck.value = decks.value.find(d => d.id === deckId);
+                };
+                
+                const exportDeck = async (deckId) => {
+                    if (!user.value) return;
+                    const deck = decks.value.find(d => d.id === deckId);
+                    if(!deck) return;
+                    
+                    const cardsToExport = (allCards[deckId] || []).map(({front, back, type, tags}) => ({front, back, type, tags}));
+                    const exportData = { name: deck.name, cards: cardsToExport };
+                    const jsonString = JSON.stringify(exportData, null, 2);
+                    const blob = new Blob([jsonString], {type: 'application/json'});
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `${deck.name.replace(/\s+/g, '_')}_export.json`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                };
+
+                const triggerImport = () => fileInput.value.click();
+                const importDeck = (event) => {
+                    const file = event.target.files[0];
+                    if (!file) return;
+                    const reader = new FileReader();
+                    reader.onload = async (e) => {
+                        try {
+                            const deckData = JSON.parse(e.target.result);
+                            if (!deckData.name || !Array.isArray(deckData.cards)) throw new Error("Invalid format.");
+                            const newDeckRef = await addDoc(collection(db, `users/${user.value.uid}/decks`), {
+                                name: deckData.name, createdAt: Timestamp.now(), deletedAt: null
+                            });
+
+                            const batch = writeBatch(db);
+                            const cardsColRef = collection(db, newDeckRef.path, "cards");
+                            deckData.cards.forEach(card => {
+                                const newCardRef = doc(cardsColRef);
+                                batch.set(newCardRef, { front: card.front, back: card.back, type: card.type || 'basic', tags: card.tags || [] });
+                            });
+                            await batch.commit();
+                            showToast(`Deck "${deckData.name}" imported.`, 'success');
+                        } catch(err) { 
+                            showToast("Failed to import deck.", 'error');
+                        }
+                    };
+                    reader.readAsText(file);
+                    event.target.value = '';
+                };
+
+                // --- MERGE DECK ---
+                const mergeableDecks = computed(() => sourceDeck.value ? decks.value.filter(d => d.id !== sourceDeck.value.id) : []);
+                const openMergeDeckModal = (deck) => {
+                    decks.value.forEach(d => d.showMenu = false);
+                    sourceDeck.value = deck;
+                    showMergeDeckModal.value = true;
+                };
+                const closeMergeDeckModal = () => {
+                    showMergeDeckModal.value = false;
+                    sourceDeck.value = null;
+                    destinationDeckId.value = null;
+                };
+                const mergeDecks = () => {
+                    if (!sourceDeck.value || !destinationDeckId.value) return;
+                    const destDeck = decks.value.find(d => d.id === destinationDeckId.value);
+                    if (!destDeck) return;
+
+                    askForConfirmation( 'Confirm Merge', `Merge all cards from "${sourceDeck.value.name}" into "${destDeck.name}"? The original deck will be deleted.`,
+                        async () => {
+                            const sourceDeckId = sourceDeck.value.id;
+                            try {
+                                const sourceCards = allCards[sourceDeckId] || [];
+                                const destCardsRef = collection(db, `users/${user.value.uid}/decks/${destinationDeckId.value}/cards`);
+                                
+                                // Add cards in chunks to avoid 500 limit
+                                const chunks = [];
+                                for (let i = 0; i < sourceCards.length; i += 499) {
+                                    chunks.push(sourceCards.slice(i, i + 499));
+                                }
+
+                                for (const chunk of chunks) {
+                                    const batch = writeBatch(db);
+                                    chunk.forEach(cardData => {
+                                        const {id, ...data} = cardData; // remove old id from reactive state
+                                        batch.set(doc(destCardsRef), data);
+                                    });
+                                    await batch.commit();
+                                }
+                                
+                                // After successful move, delete the original deck
+                                await permanentlyDeleteDeck(sourceDeckId, true);
+                                showToast("Decks merged successfully.", 'success');
+                            } catch (error) {
+                                console.error("Error merging decks:", error);
+                                showToast("Could not merge the decks.", 'error');
+                            } finally {
+                                closeMergeDeckModal();
+                            }
+                        },
+                        { confirmText: 'Merge & Delete', isDestructive: true }
+                    );
+                };
+
+                // --- CARD MANAGEMENT ---
+                const openCardManager = (deckId) => {
+                    selectDeck(deckId);
+                    currentView.value = 'cardManager';
+                    cards.value = allCards[deckId] || [];
+                };
+                const openAddCardModal = () => {
+                    editingCard.value = null;
+                    cardForm.front = ''; cardForm.back = ''; cardForm.tags = '';
+                    showCardModal.value = true;
+                };
+                const openEditCardModal = (card) => {
+                    editingCard.value = card;
+                    cardForm.front = card.front; cardForm.back = card.back;
+                    cardForm.tags = (card.tags || []).join(', ');
+                    showCardModal.value = true;
+                };
+                const closeCardModal = () => { showCardModal.value = false; editingCard.value = null; };
+                const saveCard = async () => {
+                    if (!selectedDeckId.value || !cardForm.front.trim() || !user.value) return;
+                    const cardData = {
+                        front: cardForm.front,
+                        back: cardForm.back,
+                        type: cardForm.front.includes('{{c') ? 'cloze' : 'basic',
+                        tags: cardForm.tags.split(',').map(t => t.trim()).filter(t => t)
+                    };
+                    
+                    const collectionPath = `users/${user.value.uid}/decks/${selectedDeckId.value}/cards`;
+                    if (editingCard.value) {
+                        await updateDoc(doc(db, collectionPath, editingCard.value.id), cardData);
+                    } else {
+                        await addDoc(collection(db, collectionPath), cardData);
+                    }
+                    closeCardModal();
+                };
+                const deleteCard = (cardId) => {
+                    askForConfirmation('Delete Card?', 'This cannot be undone.', async () => {
+                        if (!user.value || !selectedDeckId.value) return;
+                        await deleteDoc(doc(db, `users/${user.value.uid}/decks/${selectedDeckId.value}/cards`, cardId));
+                    }, { confirmText: 'Delete', isDestructive: true });
+                };
+                 const handleCardClick = () => {
+                    if (currentView.value === 'study' && currentCard.value) {
+                        showAnswer.value = !showAnswer.value;
+                    }
+                };
+                
+                // --- AI DECK GENERATION ---
+                const openAutoDeckModal = () => {
+                    autoDeckState.value = 'input';
+                    autoDeckText.value = '';
+                    autoDeckName.value = '';
+                    generatedCards.value = [];
+                    generationError.value = null;
+                    showAutoDeckModal.value = true;
+                };
+                const handleFileUpload = (event) => {
+                    const file = event.target.files[0];
+                    if (!file) return;
+
+                    autoDeckState.value = 'processing';
+                    generationError.value = null;
+
+                    if (!autoDeckName.value) {
+                        autoDeckName.value = file.name.replace(/\.[^/.]+$/, "");
+                    }
+
+                    const reader = new FileReader();
+                    const fileExtension = file.name.split('.').pop().toLowerCase();
+
+                    if (fileExtension === 'txt') {
+                        reader.onload = (e) => {
+                            autoDeckText.value = e.target.result;
+                            autoDeckState.value = 'input';
+                        };
+                        reader.readAsText(file);
+                    } else if (fileExtension === 'docx') {
+                        reader.onload = (e) => {
+                            mammoth.extractRawText({ arrayBuffer: e.target.result })
+                                .then(result => {
+                                    autoDeckText.value = result.value;
+                                    autoDeckState.value = 'input';
+                                })
+                                .catch(err => {
+                                    console.error("Error parsing .docx file:", err);
+                                    generationError.value = "Could not read the Word file.";
+                                    autoDeckState.value = 'input';
+                                });
+                        };
+                        reader.readAsArrayBuffer(file);
+                    } else if (fileExtension === 'pdf') {
+                        reader.onload = async (e) => {
+                            try {
+                                const pdf = await pdfjsLib.getDocument(e.target.result).promise;
+                                let fullText = '';
+                                for (let i = 1; i <= pdf.numPages; i++) {
+                                    const page = await pdf.getPage(i);
+                                    const textContent = await page.getTextContent();
+                                    fullText += textContent.items.map(item => item.str).join(' ');
+                                    fullText += '\n'; // Add newline between pages
+                                }
+                                autoDeckText.value = fullText;
+                                autoDeckState.value = 'input';
+                            } catch (err) {
+                                console.error("Error parsing .pdf file:", err);
+                                generationError.value = "Could not read the PDF file. It may be corrupted or image-based.";
+                                autoDeckState.value = 'input';
+                            }
+                        };
+                        reader.readAsArrayBuffer(file);
+                    } else {
+                        generationError.value = "Unsupported file type. Please use .txt, .docx, or .pdf.";
+                        autoDeckState.value = 'input';
+                    }
+                };
+                const closeAutoDeckModal = () => {
+                    showAutoDeckModal.value = false;
+                };
+                const handleGenerateCards = async () => {
+                    if (!autoDeckText.value.trim() || !autoDeckName.value.trim()) return;
+                    autoDeckState.value = 'generating';
+                    generationError.value = null;
+
+                    const userQuery = autoDeckText.value;
+                    const apiKey = ""; 
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`;
+
+                    const payload = {
+                        contents: [{ parts: [{ text: userQuery }] }],
+                        systemInstruction: { parts: [{ text: settings.aiPrompt }] },
+                        generationConfig: {
+                            responseMimeType: "application/json",
+                            responseSchema: {
+                                type: "ARRAY",
+                                items: {
+                                    type: "OBJECT",
+                                    properties: { "question": { "type": "STRING" }, "answer": { "type": "STRING" } },
+                                    required: ["question", "answer"]
+                                }
+                            }
+                        }
+                    };
+
+                    try {
+                        const response = await fetch(apiUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+                        if (!response.ok) throw new Error(`API request failed with status ${response.status}`);
+                        const result = await response.json();
+                        const jsonText = result.candidates?.[0]?.content?.parts?.[0]?.text;
+                        if (jsonText) {
+                            generatedCards.value = JSON.parse(jsonText);
+                            autoDeckState.value = 'preview';
+                        } else {
+                            throw new Error("Failed to parse generated cards from API response.");
+                        }
+                    } catch (error) {
+                        console.error("Error generating flashcards:", error);
+                        generationError.value = "Sorry, something went wrong. Please try again.";
+                        autoDeckState.value = 'input';
+                    }
+                };
+                const deleteGeneratedCard = (index) => {
+                    generatedCards.value.splice(index, 1);
+                };
+                const addCardsToDeck = async (deckId, cardsToAdd) => {
+                    const batch = writeBatch(db);
+                    const cardsCollectionRef = collection(db, `users/${user.value.uid}/decks/${deckId}/cards`);
+                    cardsToAdd.forEach(card => {
+                        const newCardRef = doc(cardsCollectionRef);
+                        batch.set(newCardRef, {
+                            front: card.question,
+                            back: card.answer,
+                            type: card.question.includes('{{c') ? 'cloze' : 'basic'
+                        });
+                    });
+                    await batch.commit();
+                };
+                const saveGeneratedDeck = async () => {
+                    const trimmedDeckName = autoDeckName.value.trim();
+                    if (!trimmedDeckName || generatedCards.value.length === 0 || !user.value) return;
+
+                    const existingDeck = decks.value.find(deck => deck.name.toLowerCase() === trimmedDeckName.toLowerCase());
+
+                    if (existingDeck) {
+                        askForConfirmation(
+                            'Merge Deck',
+                            `A deck named "${trimmedDeckName}" already exists. Do you want to add these new cards to it?`,
+                            async () => {
+                                await addCardsToDeck(existingDeck.id, generatedCards.value);
+                                closeAutoDeckModal();
+                            },
+                            { confirmText: 'Merge', isDestructive: false }
+                        );
+                    } else {
+                        const deckRef = await addDoc(collection(db, `users/${user.value.uid}/decks`), {
+                            name: trimmedDeckName,
+                            createdAt: Timestamp.now(),
+                            deletedAt: null
+                        });
+                        await addCardsToDeck(deckRef.id, generatedCards.value);
+                        closeAutoDeckModal();
+                    }
+                };
+                
+                // --- BROWSE VIEW LOGIC ---
+                const browsableDecks = computed(() => {
+                    const _ = progressVersion.value;
+                    const lowerSearch = browseSearch.value.toLowerCase();
+                    const lowerTag = browseTagFilter.value.toLowerCase();
+
+                    return decks.value.map(deck => {
+                        let deckCards = (allCards[deck.id] || []).map(card => {
+                            const progress = getCardProgress(deck.id, card.id);
+                            return {
+                                ...card,
+                                ...progress,
+                                status: getCardStatus(progress),
+                            };
+                        });
+
+                        // Apply filters
+                        if (lowerSearch) {
+                            deckCards = deckCards.filter(c => c.front.toLowerCase().includes(lowerSearch) || c.back.toLowerCase().includes(lowerSearch));
+                        }
+                        if (lowerTag) {
+                            deckCards = deckCards.filter(c => (c.tags || []).some(t => t.toLowerCase().includes(lowerTag)));
+                        }
+                        if (browseStatusFilter.value !== 'all') {
+                             const now = new Date();
+                             now.setHours(23, 59, 59, 999);
+                            if (browseStatusFilter.value === 'Due') {
+                                deckCards = deckCards.filter(c => c.dueDate && new Date(c.dueDate) <= now);
+                            } else {
+                                deckCards = deckCards.filter(c => c.status === browseStatusFilter.value);
+                            }
+                        }
+                        
+                        return { ...deck, cards: deckCards };
+                    });
+                });
+                
+                const browseSummary = computed(() => {
+                    const _ = progressVersion.value;
+                    let total = 0, mastered = 0, due = 0;
+                    total = Object.values(allCards).flat().length; 
+                    const now = new Date();
+                    now.setHours(23, 59, 59, 999);
+                    
+                    Object.keys(allCards).forEach(deckId => {
+                        allCards[deckId].forEach(card => {
+                             const progress = getCardProgress(deckId, card.id);
+                             const status = getCardStatus(progress);
+                             if (status === 'Mastered') mastered++;
+                             if (progress.dueDate && new Date(progress.dueDate) <= now) due++;
+                        });
+                    });
+                    return { total, mastered, due };
+                });
+
+
+                // --- STUDY SESSION ---
+                const startStudy = async (deckId) => {
+                    if (!user.value) return;
+                    session.deckId = deckId;
+                    const cardsForDeck = allCards[deckId] || [];
+                    const now = new Date();
+                    now.setHours(23, 59, 59, 999);
+                    
+                    let due = [], fresh = [];
+                    for(const card of cardsForDeck) {
+                        const progress = getCardProgress(deckId, card.id);
+                        if (!progress.dueDate) fresh.push(card);
+                        else if (new Date(progress.dueDate) <= now) due.push(card);
+                    }
+
+                    session.dueQueue = due.sort(() => Math.random() - 0.5).slice(0, settings.maxReviewsPerDay);
+                    session.newQueue = fresh.sort(() => Math.random() - 0.5).slice(0, settings.newCardsPerDay);
+                    session.lapsedQueue = [];
+                    currentView.value = 'study';
+                    nextCard();
+                };
+
+                const stopStudy = () => {
+                    updateDeckCounts(session.deckId);
+                    currentView.value = 'dashboard';
+                    currentCard.value = null;
+                    showAnswer.value = false;
+                };
+
+                const nextCard = () => {
+                    showAnswer.value = false;
+                    if (session.lapsedQueue.length > 0) currentCard.value = session.lapsedQueue.shift();
+                    else if (session.dueQueue.length > 0) currentCard.value = session.dueQueue.shift();
+                    else if (session.newQueue.length > 0) currentCard.value = session.newQueue.shift();
+                    else currentCard.value = null;
+                };
+                
+                 const revealAnswer = () => { if (!showAnswer.value) showAnswer.value = true; };
+                
+                const rateCard = async (quality) => {
+                    if (!user.value || !currentCard.value) return;
+
+                    const card = currentCard.value;
+                    let { repetitions, interval, easeFactor } = getCardProgress(session.deckId, card.id);
+                    
+                    const rating = quality; // 1: Again, 2: Hard, 3: Good, 4: Easy
+
+                    if (rating < 3) { // Again or Hard
+                        repetitions = 0;
+                        interval = 1;
+                        if (rating === 1) easeFactor = Math.max(1.3, easeFactor - 0.2); // Again
+                        else easeFactor = Math.max(1.3, easeFactor - 0.15); // Hard
+                        session.lapsedQueue.push(card); // Re-learn in same session
+                    } else { // Good or Easy
+                        repetitions += 1;
+                        if (repetitions === 1) {
+                            interval = 1; // 1 day
+                        } else if (repetitions === 2) {
+                            interval = 4; // 4 days
+                        } else {
+                            interval = Math.ceil(interval * easeFactor);
+                        }
+                        if(rating === 4) easeFactor += 0.15; // Easy bonus
+                    }
+                    
+                    const today = new Date();
+                    const newDueDate = new Date();
+                    newDueDate.setDate(today.getDate() + interval);
+                    
+                    saveCardProgress(session.deckId, card.id, {
+                        repetitions,
+                        interval,
+                        easeFactor,
+                        dueDate: newDueDate.toISOString(),
+                        lastReviewed: today.toISOString()
+                    });
+                    
+                    await recordReview(session.deckId, card.id, rating >= 3);
+                    nextCard();
+                };
+
+
+                const renderCardContent = (content, isBack = false) => {
+                    const contentStr = String(content || '');
+                    const escapeHtml = (unsafe) => unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
+                    if (!contentStr.trim()) return isBack ? '<span class="text-gray-400">[No content on back]</span>' : '';
+                    if (/{{c\d::(.*?)}}/.test(contentStr)) {
+                        const escaped = escapeHtml(contentStr);
+                        const processed = isBack ? escaped.replace(/{{c\d::(.*?)}}/g, `<strong class="cloze-revealed">$1</strong>`) : escaped.replace(/{{c\d::(.*?)}}/g, `<span class="font-semibold text-gray-700 dark:text-gray-300">___________</span>`);
+                        return processed.replace(/\n/g, '<br>');
+                    }
+                    return escapeHtml(contentStr).replace(/\n/g, '<br>');
+                };
+                
+                 // --- STATISTICS & SETTINGS ---
+                const stats = ref({ todayReviews: 0, streak: 0, masteredCards: 0, avgEase: 0, avgInterval: 0 });
+                let reviewChart = null;
+
+                const performanceByTag = computed(() => {
+                    const _ = progressVersion.value;
+                    const tagData = {};
+                     Object.keys(allCards).forEach(deckId => {
+                        allCards[deckId].forEach(card => {
+                             const progress = getCardProgress(deckId, card.id);
+                             const status = getCardStatus(progress);
+                             (card.tags || []).forEach(tag => {
+                                 if(!tagData[tag]) tagData[tag] = { total: 0, new: 0, due: 0, mastered: 0};
+                                 tagData[tag].total++;
+                                 if (status === 'New') tagData[tag].new++;
+                                 if (status === 'Due') {
+                                     const now = new Date();
+                                     now.setHours(23, 59, 59, 999);
+                                     if(progress.dueDate && new Date(progress.dueDate) <= now) tagData[tag].due++;
+                                 }
+                                 if (status === 'Mastered') tagData[tag].mastered++;
+                             });
+                        });
+                    });
+                    return tagData;
+                });
+
+                const loadUserSettings = async () => {
+                    if (!user.value) return;
+                    const settingsRef = doc(db, `users/${user.value.uid}/settings`, 'main');
+                    const docSnap = await getDoc(settingsRef);
+                    if (docSnap.exists()) {
+                        const userSettings = docSnap.data();
+                        Object.assign(settings, userSettings);
+                        if(userSettings.theme) theme.value = userSettings.theme;
+                    }
+                };
+                const saveSettings = async () => {
+                    if (!user.value) return;
+                    const { newCardsPerDay, maxReviewsPerDay } = settings;
+                    await setDoc(doc(db, `users/${user.value.uid}/settings`, 'main'), 
+                      { newCardsPerDay, maxReviewsPerDay, theme: theme.value }, 
+                      { merge: true });
+                    showToast("Settings saved!", 'success');
+                };
+                const recordReview = async (deckId, cardId, correct) => {
+                    if (!user.value) return;
+                    await addDoc(collection(db, `users/${user.value.uid}/reviews`), {
+                        date: new Date().toISOString().split('T')[0], correct, deckId, cardId, timestamp: Timestamp.now()
+                    });
+                };
+                const loadStats = () => {
+                     if (!user.value) return;
+                     onSnapshot(query(collection(db, `users/${user.value.uid}/reviews`), orderBy('date')), (snapshot) => {
+                         const allReviews = snapshot.docs.map(doc => doc.data());
+                         stats.value.masteredCards = decks.value.reduce((acc, deck) => acc + (deck.masteredCount || 0), 0);
+                         if (allReviews.length === 0) {
+                             stats.value.todayReviews = 0; stats.value.streak = 0; updateChart([],[]); return;
+                         }
+                         const todayStr = new Date().toISOString().split('T')[0];
+                         stats.value.todayReviews = allReviews.filter(r => r.date === todayStr).length;
+                         
+                         const reviewDates = [...new Set(allReviews.map(r => r.date))].sort();
+                         let currentStreak = 0;
+                         if (reviewDates.length > 0) {
+                             const lastDay = new Date(reviewDates[reviewDates.length - 1]);
+                             const today = new Date(todayStr);
+                             const yesterday = new Date(todayStr); yesterday.setDate(yesterday.getDate() - 1);
+                             if (lastDay.toISOString().split('T')[0] === today.toISOString().split('T')[0] || lastDay.toISOString().split('T')[0] === yesterday.toISOString().split('T')[0]) {
+                                 currentStreak = 1;
+                                 for (let i = reviewDates.length - 2; i >= 0; i--) {
+                                     const diffDays = Math.round((new Date(reviewDates[i+1]) - new Date(reviewDates[i])) / 86400000);
+                                     if(diffDays === 1) currentStreak++; else break;
+                                 }
+                             }
+                         }
+                         stats.value.streak = currentStreak;
+
+                        // Calculate average ease and interval from local storage
+                        const progressData = getProgressData();
+                        let totalEase = 0, totalInterval = 0, reviewedCount = 0;
+                        Object.values(progressData).forEach(deckProgress => {
+                            Object.values(deckProgress).forEach(cardProgress => {
+                                if(cardProgress.lastReviewed) {
+                                    totalEase += cardProgress.easeFactor;
+                                    totalInterval += cardProgress.interval;
+                                    reviewedCount++;
+                                }
+                            });
+                        });
+                        stats.value.avgEase = reviewedCount > 0 ? (totalEase / reviewedCount).toFixed(2) : 0;
+                        stats.value.avgInterval = reviewedCount > 0 ? (totalInterval / reviewedCount).toFixed(1) : 0;
+
+
+                          const reviewCountsByDay = allReviews.reduce((acc, rev) => { acc[rev.date] = (acc[rev.date] || 0) + 1; return acc; }, {});
+                          const labels = Object.keys(reviewCountsByDay).sort();
+                          const data = labels.map(label => reviewCountsByDay[label]);
+                          updateChart(labels, data);
+                     }, (error) => { appError.value = "Could not load statistics."; });
+                };
+                const exportChart = () => {
+                    if(reviewChart){
+                        const a = document.createElement('a');
+                        a.href = reviewChart.toBase64Image();
+                        a.download = 'review_progress.png';
+                        a.click();
+                    }
+                };
+                const updateChart = (labels, data) => {
+                    nextTick(() => {
+                        const ctx = document.getElementById('reviewChart');
+                        if (!ctx) return;
+
+                        const isDarkMode = document.documentElement.classList.contains('dark');
+                        const options = {
+                            scales: {
+                                y: {
+                                    beginAtZero: true,
+                                    ticks: { color: isDarkMode ? '#9ca3af' : '#4b5563' },
+                                    grid: { color: isDarkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' }
+                                },
+                                x: {
+                                    ticks: { color: isDarkMode ? '#9ca3af' : '#4b5563' },
+                                    grid: { display: false }
+                                }
+                            },
+                            plugins: {
+                                legend: {
+                                    labels: { color: isDarkMode ? '#9ca3af' : '#4b5563' }
+                                }
+                            }
+                        };
+
+                        if (reviewChart) {
+                           reviewChart.destroy();
+                        }
+                        reviewChart = new Chart(ctx.getContext('2d'), {
+                            type: 'line', data: { labels, datasets: [{ label: '# of Reviews', data, backgroundColor: 'rgba(79, 70, 229, 0.2)', borderColor: 'rgba(79, 70, 229, 1)', borderWidth: 2, tension: 0.2 }] },
+                            options: options
+                        });
+                    });
+                };
+
+                 // --- HEATMAP LOGIC ---
+                const heatmapMonthName = computed(() => {
+                    return heatmapDate.value.toLocaleString('default', { month: 'long', year: 'numeric' });
+                });
+                
+                const heatmapData = computed(() => {
+                    const _ = progressVersion.value;
+                    const year = heatmapDate.value.getFullYear();
+                    const month = heatmapDate.value.getMonth();
+                    const firstDayOfMonth = new Date(year, month, 1);
+                    const lastDayOfMonth = new Date(year, month + 1, 0);
+
+                    const days = [];
+                    // Add blank days for the start of the month
+                    for (let i = 0; i < firstDayOfMonth.getDay(); i++) {
+                        days.push({ date: null, count: 0 });
+                    }
+
+                    // Add actual days
+                    for (let i = 1; i <= lastDayOfMonth.getDate(); i++) {
+                        const date = new Date(year, month, i);
+                        const dateString = date.toISOString().split('T')[0];
+                        days.push({ date: dateString, count: 0 });
+                    }
+
+                    // Calculate review counts
+                    const progressData = getProgressData();
+                    Object.keys(progressData).forEach(deckId => {
+                        Object.keys(progressData[deckId]).forEach(cardId => {
+                            const cardProgress = progressData[deckId][cardId];
+                            if (cardProgress.dueDate) {
+                                const dueDate = new Date(cardProgress.dueDate);
+                                if (dueDate.getFullYear() === year && dueDate.getMonth() === month) {
+                                    const dayIndex = firstDayOfMonth.getDay() + dueDate.getDate() - 1;
+                                    if(days[dayIndex]) days[dayIndex].count++;
+                                }
+                            }
+                        });
+                    });
+
+                    return days;
+                });
+
+                const changeHeatmapMonth = (offset) => {
+                    heatmapDate.value = new Date(heatmapDate.value.setMonth(heatmapDate.value.getMonth() + offset));
+                };
+
+                const getHeatmapColor = (count) => {
+                    const isDark = theme.value === 'dark';
+                    if (count > 20) return isDark ? 'bg-indigo-400' : 'bg-indigo-700';
+                    if (count > 10) return isDark ? 'bg-indigo-500' : 'bg-indigo-600';
+                    if (count > 5) return isDark ? 'bg-indigo-600' : 'bg-indigo-500';
+                    if (count > 0) return isDark ? 'bg-indigo-700' : 'bg-indigo-400';
+                    return '';
+                };
+
+                const showTooltip = (event, day) => {
+                    if (!day || day.count === 0) return;
+                    const rect = event.target.getBoundingClientRect();
+                    tooltip.content = `${day.count} review${day.count > 1 ? 's' : ''} on ${new Date(day.date).toLocaleDateString()}`;
+                    tooltip.x = rect.left + window.scrollX + (rect.width / 2);
+                    tooltip.y = rect.top + window.scrollY - 12; // Position it just above the square
+                    tooltip.show = true;
+                };
+
+                const hideTooltip = () => {
+                    tooltip.show = false;
+                };
+
+
+                watch(currentView, (newView) => { 
+                    if (newView === 'stats') loadStats();
+                    // Close any open popups when view changes
+                    decks.value.forEach(d => d.showMenu = false);
+                    isMobileSidebarOpen.value = false;
+                });
+                watch(user, (newUser) => { if(newUser) { loadUserSettings(); loadUserDecks(); loadStats(); } });
+
+                return {
+                    user, authReady, authView, email, password, authError, handleLogin, handleSignup, handleLogout,
+                    isSidebarOpen, isMobileSidebarOpen, theme, toast,
+                    currentView, decks, recycledDecks, showAddDeckModal, newDeckName, addDeck, selectDeck, deckFilter, filteredDecks, exportDeck, deleteDeck, toggleDeckMenu,
+                    selectedDeckId, selectedDeck, cards, openCardManager,
+                    showCardModal, editingCard, cardForm, openAddCardModal, openEditCardModal, closeCardModal, saveCard, deleteCard, clozeExample,
+                    session, currentCard, showAnswer, startStudy, stopStudy, renderCardContent,
+                    revealAnswer, rateCard, handleCardClick,
+                    showAutoDeckModal, autoDeckState, autoDeckText, autoDeckName, generatedCards, generationError, openAutoDeckModal, closeAutoDeckModal, handleGenerateCards, deleteGeneratedCard, saveGeneratedDeck, handleFileUpload,
+                    stats, exportChart, settings, saveSettings,
+                    showConfirmModal, confirmModal, appError, showRecycleBinModal, permanentlyDeleteDeck, restoreDeck,
+                    showMergeDeckModal, sourceDeck, destinationDeckId, mergeableDecks, openMergeDeckModal, closeMergeDeckModal, mergeDecks,
+                    triggerImport, importDeck, fileInput,
+                    browsableDecks, browseSummary, browseSearch, browseTagFilter, browseStatusFilter,
+                    getTagColor, filterByTag, performanceByTag, getStatusColor,
+                    heatmapData, heatmapMonthName, changeHeatmapMonth, getHeatmapColor, tooltip, showTooltip, hideTooltip, showHeatmap
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+</html>
+
